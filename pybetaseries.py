@@ -39,7 +39,9 @@ def get_smoothing_kernel(cutoff, ntp):
     F = N.eye(ntp) - H
     return F
 
-def pybetaseries(fsfdir, method=['lsall', 'lsone'], time_res=0.1,
+def pybetaseries(fsfdir,
+                 methods=['lsall', 'lsone'],
+                 time_res=0.1,
                  modeldir=None,
                  outdir=None,
                  designdir=None,
@@ -71,11 +73,9 @@ def pybetaseries(fsfdir, method=['lsall', 'lsone'], time_res=0.1,
         'feat_files(1)'
     """
 
-    methods = {'lsall':0, 'lsone':0}
-    for m in  method:
-        assert(m in methods,
-               "Method %s must be present among known %s" % (m, methods.keys()))
-        methods[m] = 1
+    known_methods = ['lsall', 'lsone']
+    assert set(methods).issubset(set(known_methods)), \
+           "Unknown method(s): %s" % (set(methods).difference(set(known_methods)))
 
     if not os.path.exists(fsfdir):
         print 'ERROR: %s does not exist!' % fsfdir
@@ -150,7 +150,9 @@ def pybetaseries(fsfdir, method=['lsall', 'lsone'], time_res=0.1,
 
     for ev in range(design['fmri(evs_orig)']):
         # filter out motion parameters
-        if design['fmri(evtitle%d)'%int(ev+1)].find('mot')!=0:
+        evtitle = design['fmri(evtitle%d)'%int(ev+1)]
+        verbose(2, "Loading %s" % evtitle)
+        if evtitle.find('mot')!=0:
             good_evs.append(evctr)
             evctr+=1
             if design['fmri(deriv_yn%d)'%int(ev+1)]==1:
@@ -171,31 +173,32 @@ def pybetaseries(fsfdir, method=['lsall', 'lsone'], time_res=0.1,
     
     for x in range(len(good_evs)):
         ntrials_total = ntrials_total+len(ons[x]['onsets'])
-    
-    if methods['lsone']==1:
-     # loop through the good evs and build the ls-one model
-     # design matrix for each trial/ev
-       method = 'lsone'
-       verbose(1, 'Estimating ls-one model...')
-       dm_nuisanceevs = desmat.mat[:, motion_evs]
-       trial_ctr = 0
-       all_conds = []
-       beta_maker = N.zeros((ntrials_total, ntp))
-       for e in range(len(good_evs)):
+
+    dm_nuisanceevs = desmat.mat[:, motion_evs]
+
+    if 'lsone' in methods:
+        # loop through the good evs and build the ls-one model
+        # design matrix for each trial/ev
+        method = 'lsone'
+        verbose(1, 'Estimating ls-one model...')
+        trial_ctr = 0
+        all_conds = []
+        beta_maker = N.zeros((ntrials_total, ntp))
+        for e in range(len(good_evs)):
             ev = good_evs[e]
             # first, take the original desmtx and remove the ev of interest
             other_good_evs = [x for x in good_evs if x != ev]
             # put the temporal derivatives in
             og = copy(other_good_evs)
             for x in og:
-                if ev_td[x]>0:
+                if ev_td[x] > 0:
                     other_good_evs.append(x+1)
             dm_otherevs = desmat.mat[:, other_good_evs]
             cond_ons = N.array(ons[e].onsets)
             cond_dur = N.array(ons[e].durations)
             ntrials = len(cond_ons)
             glm_res_full = N.zeros((nvox, ntrials))
-            print 'processing ev %d: %d trials'%(e+1, ntrials)
+            verbose(2, 'processing ev %d: %d trials' % (e+1, ntrials))
             for t in range(ntrials):
                 all_conds.append((ev/2)+1)
                 if cond_ons[t] > max_evtime:
@@ -232,24 +235,23 @@ def pybetaseries(fsfdir, method=['lsall', 'lsone'], time_res=0.1,
                 beta_maker_loop = N.linalg.pinv(dm_full)
                 beta_maker[trial_ctr, :] = beta_maker_loop[0, :]
                 trial_ctr+=1
-       # this uses Jeanette's trick of extracting the beta-forming vector for each
-       # trial and putting them together, which allows estimation for all trials
-       # at once
-       
-       glm_res_full = N.dot(beta_maker, data.samples)
+        # this uses Jeanette's trick of extracting the beta-forming vector for each
+        # trial and putting them together, which allows estimation for all trials
+        # at once
+        
+        glm_res_full = N.dot(beta_maker, data.samples)
+ 
+        # map the data into images and save to betaseries directory
+        
+        all_conds = N.array(all_conds)
+        for e in range(len(good_evs)):
+            ni = map2nifti(data, data=glm_res_full[N.where(all_conds==(e+1))[0], :])
+            ni.to_filename(fsfdir+'betaseries/ev%d_%s.nii.gz'%(int(e+1), method))
 
-       # map the data into images and save to betaseries directory
-       
-       all_conds = N.array(all_conds)
-       for e in range(len(good_evs)):
-           ni = map2nifti(data, data=glm_res_full[N.where(all_conds==(e+1))[0], :])
-           ni.to_filename(fsfdir+'betaseries/ev%d_%s.nii.gz'%(int(e+1), method))
 
-
-    if methods['lsall']==1:  # do ls-all
+    if 'lsall' in methods:  # do ls-all
        method = 'lsall'
        print 'estimating ls-all...'
-       dm_nuisance = desmat.mat[:, motion_evs]
        # first get all onsets in a row
        all_onsets = []
        all_durations = []
@@ -277,7 +279,7 @@ def pybetaseries(fsfdir, method=['lsall', 'lsone'], time_res=0.1,
 
        # filter the desmtx, except for the nuisance part (which is already filtered)
        if len(motion_evs)>0:
-           dm_full = N.hstack((N.dot(F, dm_trials), dm_nuisance))
+           dm_full = N.hstack((N.dot(F, dm_trials), dm_nuisanceevs))
        else:
            dm_full = N.dot(F, dm_trials)
 
@@ -363,14 +365,18 @@ def estimate_OLS(desmtx, data, demean=1, resid=0):
 
 if __name__ == '__main__':
     # #'/usr/share/fsl-feeds/data/fmri.feat/',
-    topdir = '/data/famface/nobackup_pipe+derivs+nipymc/famface_level1/firstlevel'
-    modelfit_dir = os.path.join(topdir, 'modelfit/_subject_id_km00/_fwhm_4.0/')
-    mask_file = os.path.join(topdir, 'preproc/_subject_id_km00/meanfuncmask/corr_06mar11km_WIP_fMRI_SSh_3mm_sense2_sl35_SENSE_13_1_dtype_mean_brain_mask.nii.gz')
-    pybetaseries(
+    if True:
+        pybetaseries('/home/yoh/proj/pymvpa/pymvpa/3rd/pybetaseries/run001_test_data.feat',
+                     design_fsf_file='design_yoh.fsf')
+    else:
+        topdir = '/data/famface/nobackup_pipe+derivs+nipymc/famface_level1/firstlevel'
+        modelfit_dir = os.path.join(topdir, 'modelfit/_subject_id_km00/_fwhm_4.0/')
+        mask_file = os.path.join(topdir, 'preproc/_subject_id_km00/meanfuncmask/corr_06mar11km_WIP_fMRI_SSh_3mm_sense2_sl35_SENSE_13_1_dtype_mean_brain_mask.nii.gz')
+        pybetaseries(
                  os.path.join(modelfit_dir, 'level1design'),
                  design_fsf_file='run0.fsf',
                  modeldir=os.path.join(modelfit_dir, 'modelgen/mapflow/_modelgen0'),
                  design_mat_file='run0.mat',
                  mask_file=mask_file,
-                 method='lsone',
+                 #methods=['lsone'],
                  outdir='/tmp/betaseries')
