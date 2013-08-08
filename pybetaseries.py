@@ -89,10 +89,7 @@ def extract_lsone(data, TR, time_res,
         ev = good_evs[e]
         # first, take the original desmtx and remove the ev of interest
         other_good_evs = [x for x in good_evs if x != ev]
-        # put the temporal derivatives in
-        #import pydb; pydb.debugger()
-        # yoh: no need to copy anything here
-        #og = copy(other_good_evs)
+        # put the temporal derivatives into other_good_evs
         for x in other_good_evs:
             if x in withderiv_evs:
                 other_good_evs.append(x+1)
@@ -163,7 +160,7 @@ def extract_lsone(data, TR, time_res,
 def extract_lsall(data, TR, time_res,
                   hrf_gen, F,
                   good_ons,
-                  good_evs, nuisance_evs, #unused withderiv_evs,
+                  good_evs,
                   desmat,
                   extract_evs=None):
     ntp, nvox = data.shape
@@ -171,8 +168,6 @@ def extract_lsall(data, TR, time_res,
     hrf = hrf_gen(time_res)
     # Set up the high time-resolution design matrix
     time_up = N.arange(0, TR*ntp+time_res, time_res)
-    ## unused n_up = len(time_up)
-    dm_nuisanceevs = desmat.mat[:, nuisance_evs]
 
     all_onsets = []
     all_durations = []
@@ -180,6 +175,10 @@ def extract_lsall(data, TR, time_res,
 
     if extract_evs is None:
         extract_evs = range(len(good_evs))
+
+    nuisance_evs = sorted(list(set(range(desmat.mat.shape[1])).difference(
+        [good_evs[e] for e in extract_evs])))
+
     for e in extract_evs:
         ev = good_evs[e]
         all_onsets    = N.hstack((all_onsets,    good_ons[e].onsets))
@@ -202,22 +201,26 @@ def extract_lsall(data, TR, time_res,
         dm_trial = N.zeros(len(time_up))
         window_ons = [N.where(time_up==x)[0][0]
                       for x in time_up
-                      if all_onsets[t] < x < all_onsets[t] + all_durations[t]]
+                      if all_onsets[t] <= x < all_onsets[t] + all_durations[t]]
         dm_trial[window_ons] = 1
-        dm_trial = N.convolve(dm_trial, hrf)[0:ntp/time_res*TR:(TR/time_res)]
-        dm_trials[:, t] = dm_trial
+        dm_trial_up = N.convolve(dm_trial, hrf)
+        dm_trial_down = dm_trial_up[0:ntp/time_res*TR:(TR/time_res)]
+        dm_trials[:, t] = dm_trial_down
 
     # filter the desmtx, except for the nuisance part (which is already filtered)
-    #import pydb;pydb.debugger()
+    # since it is taken from a loaded FSL
     dm_full = N.dot(F, dm_trials)
+
+    # mean center trials models
+    dm_trials -= dm_trials.mean(0)
+
     if len(nuisance_evs) > 0:
         # and stick nuisance evs if any to the back
-        dm_full = N.hstack((dm_full, dm_nuisanceevs))
+        dm_full = N.hstack((dm_full, desmat.mat[:, nuisance_evs]))
 
-    dm_full -= N.mean(dm_full, 0)
     dm_full = N.hstack((dm_full, N.ones((ntp, 1))))
     glm_res_full = N.dot(N.linalg.pinv(dm_full), data.samples)
-    glm_res_full = glm_res_full[0:ntrials, :]
+    glm_res_full = glm_res_full[:ntrials]
 
     return all_conds, glm_res_full
 
@@ -378,7 +381,7 @@ def pybetaseries(fsfdir,
                         data, TR, time_res,
                         spm_hrf, F,
                         good_ons,
-                        good_evs, nuisance_evs,# withderiv_evs,
+                        good_evs,
                         desmat,
                         extract_evs=[2])
         else:
@@ -464,7 +467,7 @@ if __name__ == '__main__':
                      methods=['lsall'],
                      design_fsf_file='design_yoh.fsf',
                      #mask_file='mask_small.hdr',
-                     outdir=pjoin(topdir, 'betaseries-yarikcode-2-onlyev2'))
+                     outdir=pjoin(topdir, 'betaseries-yarikcode-2-onlyev2-meanevm'))
     else:
         topdir = '/data/famface/nobackup_pipe+derivs+nipymc/famface_level1/firstlevel'
         modelfit_dir = pjoin(topdir, 'modelfit/_subject_id_km00/_fwhm_4.0/')
