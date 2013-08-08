@@ -57,6 +57,166 @@ def get_smoothing_kernel(cutoff, ntp):
     F = N.eye(ntp) - H
     return F
 
+# yoh:
+#  desmat -- theoretically should be "computed", not loaded
+#  time_up and hrf as sequences -- might better be generated "inside"
+#      since they are not "independent".  Note that time_res is now
+#      computed inside.  RFing in favor of passing TR, time_res
+#  TR -- theoretically should be available in data
+def extract_lsone(data, TR, time_res,
+                  hrf_gen, F,
+                  good_ons,
+                  good_evs, nuisance_evs, withderiv_evs,
+                  desmat,
+                  collapse_other_conditions=True):
+    # loop through the good evs and build the ls-one model
+    # design matrix for each trial/ev
+
+    ntp, nvox = data.shape
+
+    hrf = hrf_gen(time_res)
+    # Set up the high time-resolution design matrix
+    time_up = N.arange(0, TR*ntp+time_res, time_res)
+    n_up = len(time_up)
+    dm_nuisanceevs = desmat.mat[:, nuisance_evs]
+
+    ntrials_total = sum(len(o['onsets']) for o in good_ons)
+    verbose(1, "Have %d trials total to process" % ntrials_total)
+    trial_ctr = 0
+    all_conds = []
+    beta_maker = N.zeros((ntrials_total, ntp))
+    for e in range(len(good_evs)):
+        ev = good_evs[e]
+        # first, take the original desmtx and remove the ev of interest
+        other_good_evs = [x for x in good_evs if x != ev]
+        # put the temporal derivatives in
+        #import pydb; pydb.debugger()
+        # yoh: no need to copy anything here
+        #og = copy(other_good_evs)
+        for x in other_good_evs:
+            if x in withderiv_evs:
+                other_good_evs.append(x+1)
+        dm_otherevs = desmat.mat[:, other_good_evs]
+        cond_ons = N.array(good_ons[e].onsets)
+        cond_dur = N.array(good_ons[e].durations)
+        ntrials = len(cond_ons)
+        glm_res_full = N.zeros((nvox, ntrials))
+        verbose(2, 'processing ev %d: %d trials' % (e+1, ntrials))
+        for t in range(ntrials):
+            verbose(3, "processing trial %d" % t)
+            all_conds.append((ev/2)+1)
+            ## yoh: handle outside
+            ## if cond_ons[t] > max_evtime:
+            ##     verbose(1, 'TOI: skipping ev %d trial %d: %f %f'
+            ##                % (ev, t, cond_ons[t], max_evtime))
+            ##     trial_ctr += 1
+            ##     continue
+            # first build model for the trial of interest at high resolution
+            dm_toi = N.zeros(n_up)
+            window_ons = [N.where(time_up==x)[0][0]
+                          for x in time_up
+                          if (x > cond_ons[t]) & (x < cond_ons[t] + cond_dur[t])]
+            dm_toi[window_ons] = 1
+            dm_toi = N.convolve(dm_toi, hrf)[0:ntp/time_res*TR:(TR/time_res)]
+            other_trial_ons = cond_ons[N.where(cond_ons!=cond_ons[t])[0]]
+            other_trial_dur = cond_dur[N.where(cond_ons!=cond_ons[t])[0]]
+
+            dm_other = N.zeros(n_up)
+            # process the other trials
+            for o in other_trial_ons:
+                ## yoh: handle outside
+                ## if o > max_evtime:
+                ##     continue
+                # find the timepoints that fall within the window b/w onset and onset + duration
+                window_ons = [N.where(time_up==x)[0][0]
+                              for x in time_up
+                              if o < x < o + other_trial_dur[N.where(other_trial_ons==o)[0][0]]]
+                dm_other[window_ons] = 1
+
+            # Put together the design matrix
+            dm_other = N.convolve(dm_other, hrf)[0:ntp/time_res*TR:(TR/time_res)]
+            if collapse_other_conditions:
+                dm_other = N.hstack((N.dot(F, dm_other[0:ntp, N.newaxis]), dm_otherevs))
+                dm_other = N.sum(dm_other, 1)
+                dm_full = N.hstack((N.dot(F, dm_toi[0:ntp, N.newaxis]),
+                                    dm_other[:, N.newaxis], dm_nuisanceevs))
+            else:
+                dm_full = N.hstack((N.dot(F, dm_toi[0:ntp, N.newaxis]),
+                                    N.dot(F, dm_other[0:ntp, N.newaxis]),
+                                    dm_otherevs,
+                                    dm_nuisanceevs))
+            dm_full = dm_full - N.kron(N.ones(dm_full.shape[:2]),
+                                       N.mean(dm_full, 0))[:dm_full.shape[0], :dm_full.shape[1]]
+            dm_full = N.hstack((dm_full, N.ones((ntp, 1))))
+            beta_maker_loop = N.linalg.pinv(dm_full)
+            beta_maker[trial_ctr, :] = beta_maker_loop[0, :]
+            trial_ctr += 1
+    # this uses Jeanette's trick of extracting the beta-forming vector for each
+    # trial and putting them together, which allows estimation for all trials
+    # at once
+
+    glm_res_full = N.dot(beta_maker, data.samples)
+
+    return all_conds, glm_res_full
+
+
+def extract_lsall(data, TR, time_res,
+                  hrf_gen, F,
+                  good_ons,
+                  good_evs, nuisance_evs, #unused withderiv_evs,
+                  desmat):
+    ntp, nvox = data.shape
+
+    hrf = hrf_gen(time_res)
+    # Set up the high time-resolution design matrix
+    time_up = N.arange(0, TR*ntp+time_res, time_res)
+    ## unused n_up = len(time_up)
+    dm_nuisanceevs = desmat.mat[:, nuisance_evs]
+
+    all_onsets = []
+    all_durations = []
+    all_conds = []  # condition marker
+    for e in range(len(good_evs)):
+        ev = good_evs[e]
+        all_onsets    = N.hstack((all_onsets,    good_ons[e].onsets))
+        all_durations = N.hstack((all_durations, good_ons[e].durations))
+        # yoh: it was marking with (ev/2)+1 I guess assuming presence of derivatives EVs?
+        all_conds     = N.hstack((all_conds,     N.ones(len(good_ons[e].onsets))*((ev/2)+1)))
+
+    #all_onsets=N.round(all_onsets/TR)  # round to nearest TR number
+    ntrials = len(all_onsets)
+    glm_res_full = N.zeros((nvox, ntrials))
+    dm_trials = N.zeros((ntp, ntrials))
+    dm_full = []
+    for t in range(ntrials):
+        verbose(2, "Estimating for trial %d" % t)
+
+        ## yoh: TODO -- filter outside
+        ## if all_onsets[t] > max_evtime:
+        ##     continue
+        # build model for each trial
+        dm_trial = N.zeros(len(time_up))
+        window_ons = [N.where(time_up==x)[0][0]
+                      for x in time_up
+                      if all_onsets[t] < x < all_onsets[t] + all_durations[t]]
+        dm_trial[window_ons] = 1
+        dm_trial = N.convolve(dm_trial, hrf)[0:ntp/time_res*TR:(TR/time_res)]
+        dm_trials[:, t] = dm_trial
+
+    # filter the desmtx, except for the nuisance part (which is already filtered)
+    dm_full = N.dot(F, dm_trials)
+    if len(nuisance_evs) > 0:
+        # and stick nuisance evs if any to the back
+        dm_full = N.hstack((dm_full, dm_nuisanceevs))
+
+    dm_full -= N.mean(dm_full, 0)
+    dm_full = N.hstack((dm_full, N.ones((ntp, 1))))
+    glm_res_full = N.dot(N.linalg.pinv(dm_full), data.samples)
+    glm_res_full = glm_res_full[0:ntrials, :]
+
+    return all_conds, glm_res_full
+
+
 def pybetaseries(fsfdir,
                  methods=['lsall', 'lsone'],
                  time_res=0.1,
@@ -117,22 +277,27 @@ def pybetaseries(fsfdir,
     ntp, nevs = desmat.mat.shape
 
     TR = design['fmri(tr)']
-
-    hrf = spm_hrf(time_res)
-
-
-    # Set up the high time-resolution design matrix
-
-    time_up = N.arange(0, TR*ntp+time_res, time_res)
-    n_up = len(time_up)
+    # yoh: theoretically it should be identical to the one read from
+    # the nifti file, but in this sample data those manage to differ:
+    # bold_mcf_brain.nii.gz        int16  [ 64,  64,  30, 182] 3.12x3.12x5.00x1.00   sform
+    # filtered_func_data.nii.gz   float32 [ 64,  64,  30, 182] 3.12x3.12x5.00x2.00   sform
+    #assert(abs(data.a.imghdr.get_zooms()[-1] - TR) < 0.001)
+    # it is the filtered_func_data.nii.gz  which was used for analysis,
+    # and it differs from bold_mcf_brain.nii.gz ... 
 
     # exclude events that occur within two TRs of the end of the run, due to the
     # inability to accurately estimate the response to them.
 
     max_evtime = TR*ntp - 2;
+    # TODO: filter out here the trials jumping outside
 
     good_evs = []
-    motion_evs = []
+    nuisance_evs = []
+    # yoh: ev_td marks temporal derivatives (of good EVs or of nuisance -- all)
+    #      replacing with deriv_evs for consistency
+    withderiv_evs = []
+    # ev_td = N.zeros(design['fmri(evs_real)'])
+
     good_ons = []
 
     if outdir is None:
@@ -145,6 +310,8 @@ def pybetaseries(fsfdir,
     cutoff = design['fmri(paradigm_hp)']/TR
     verbose(1, "Creating smoothing kernel based on the original analysis cutoff %.2f"
                % cutoff)
+    # yoh: Verify that the kernel is correct since it looks
+    # quite ...
     F = get_smoothing_kernel(cutoff, ntp)
 
     verbose(1, "Determining non-motion conditions")
@@ -154,8 +321,6 @@ def pybetaseries(fsfdir,
     # TO DO:  add ability to manually specify motion regressors (currently assumes
     # that any EV that includes "motpar" in its name is a motion regressor)
     evctr = 0
-    # yoh: ev_td marks any "good" EV, e.g. derivative of EV of interest
-    ev_td = N.zeros(design['fmri(evs_real)'])
 
     for ev in range(1, design['fmri(evs_orig)']+1):
         # filter out motion parameters
@@ -165,172 +330,55 @@ def pybetaseries(fsfdir,
             good_evs.append(evctr)
             evctr += 1
             if design['fmri(deriv_yn%d)' % ev] == 1:
-                ev_td[evctr] = 1
+                withderiv_evs.append(evctr)
                 # skip temporal derivative
                 evctr += 1
             ev_events = FslEV3(pjoin(fsfdir, design['fmri(custom%d)' % ev]))
             good_ons.append(ev_events)
         else:
-            motion_evs.append(evctr)
+            nuisance_evs.append(evctr)
             evctr += 1
             if design['fmri(deriv_yn%d)' % ev] == 1:
                 # skip temporal derivative
-                ev_td[evctr] = 1
-                motion_evs.append(evctr)
+                withderiv_evs.append(evctr)
+                nuisance_evs.append(evctr)
                 evctr += 1
-
-    ntrials_total = sum(len(o['onsets']) for o in good_ons)
-    verbose(1, "Have %d trials total to process" % ntrials_total)
-
-    dm_nuisanceevs = desmat.mat[:, motion_evs]
 
     # load data
     verbose(1, "Loading data")
 
     maskimg = pjoin(fsfdir, mask_file or 'mask.nii.gz')
-    data = fmri_dataset(complete_filename(pjoin(fsfdir, data_file or design['feat_files'])),
-                        mask=maskimg)
-    # mask = fmri_dataset(maskimg, mask=maskimg)
-    nvox = data.nfeatures
+    # yoh: TODO design['feat_files'] is not the one "of interest" since it is
+    # the input file, while we would like to operate on pre-processed version
+    # which is usually stored as filtered_func_data.nii.gz
+    data_file_fullname = complete_filename(
+        pjoin(fsfdir, data_file or "filtered_func_data.nii.gz"))
+    data = fmri_dataset(data_file_fullname, mask=maskimg)
+    assert(len(data) == ntp)
 
+    for method in methods:
+        verbose(1, 'Estimating %(method)s model...' % locals())
 
-    if 'lsone' in methods:
-        # loop through the good evs and build the ls-one model
-        # design matrix for each trial/ev
-        method = 'lsone'
-        verbose(1, 'Estimating ls-one model...')
-        trial_ctr = 0
-        all_conds = []
-        beta_maker = N.zeros((ntrials_total, ntp))
-        for e in range(len(good_evs)):
-            ev = good_evs[e]
-            # first, take the original desmtx and remove the ev of interest
-            other_good_evs = [x for x in good_evs if x != ev]
-            # put the temporal derivatives in
-            #import pydb; pydb.debugger()
-            og = copy(other_good_evs)
-            for x in og:
-                if ev_td[x] > 0:
-                    other_good_evs.append(x+1)
-            dm_otherevs = desmat.mat[:, other_good_evs]
-            cond_ons = N.array(good_ons[e].onsets)
-            cond_dur = N.array(good_ons[e].durations)
-            ntrials = len(cond_ons)
-            glm_res_full = N.zeros((nvox, ntrials))
-            verbose(2, 'processing ev %d: %d trials' % (e+1, ntrials))
-            for t in range(ntrials):
-                verbose(3, "processing trial %d" % t)
-                all_conds.append((ev/2)+1)
-                if cond_ons[t] > max_evtime:
-                    verbose(1, 'TOI: skipping ev %d trial %d: %f %f'
-                               % (ev, t, cond_ons[t], max_evtime))
-                    trial_ctr += 1
-                    continue
-                # first build model for the trial of interest at high resolution
-                dm_toi = N.zeros(n_up)
-                window_ons = [N.where(time_up==x)[0][0]
-                              for x in time_up
-                              if (x > cond_ons[t]) & (x < cond_ons[t] + cond_dur[t])]
-                dm_toi[window_ons] = 1
-                dm_toi = N.convolve(dm_toi, hrf)[0:ntp/time_res*TR:(TR/time_res)]
-                other_trial_ons = cond_ons[N.where(cond_ons!=cond_ons[t])[0]]
-                other_trial_dur = cond_dur[N.where(cond_ons!=cond_ons[t])[0]]
-
-                dm_other = N.zeros(n_up)
-                # process the other trials
-                for o in other_trial_ons:
-                    if o > max_evtime:
-                        continue
-                    # find the timepoints that fall within the window b/w onset and onset + duration
-                    window_ons = [N.where(time_up==x)[0][0]
-                                  for x in time_up
-                                  if o < x < o + other_trial_dur[N.where(other_trial_ons==o)[0][0]]]
-                    dm_other[window_ons] = 1
-
-                # Put together the design matrix
-                dm_other = N.convolve(dm_other, hrf)[0:ntp/time_res*TR:(TR/time_res)]
-                if collapse_other_conditions:
-                    dm_other = N.hstack((N.dot(F, dm_other[0:ntp, N.newaxis]), dm_otherevs))
-                    dm_other = N.sum(dm_other, 1)
-                    dm_full = N.hstack((N.dot(F, dm_toi[0:ntp, N.newaxis]), dm_other[:, N.newaxis], dm_nuisanceevs))
-                else:
-                    dm_full = N.hstack((N.dot(F, dm_toi[0:ntp, N.newaxis]),
-                                        N.dot(F, dm_other[0:ntp, N.newaxis]),
-                                        dm_otherevs,
-                                        dm_nuisanceevs))
-                dm_full = dm_full - N.kron(N.ones(dm_full.shape[:2]),
-                                           N.mean(dm_full, 0))[:dm_full.shape[0], :dm_full.shape[1]]
-                dm_full = N.hstack((dm_full, N.ones((ntp, 1))))
-                beta_maker_loop = N.linalg.pinv(dm_full)
-                beta_maker[trial_ctr, :] = beta_maker_loop[0, :]
-                trial_ctr += 1
-        # this uses Jeanette's trick of extracting the beta-forming vector for each
-        # trial and putting them together, which allows estimation for all trials
-        # at once
-
-        glm_res_full = N.dot(beta_maker, data.samples)
-
-        # map the data into images and save to betaseries directory
-
-        all_conds = N.array(all_conds)
-        for e in range(1, len(good_evs)+1):
-            ni = map2nifti(data, data=glm_res_full[N.where(all_conds==e)[0], :])
-            ni.to_filename(pjoin(outdir, 'ev%d_%s.nii.gz' % (e, method)))
-
-
-    if 'lsall' in methods:  # do ls-all
-        method = 'lsall'
-        verbose(1, 'Estimating ls-all...')
-        # first get all onsets in a row
-        all_onsets = []
-        all_durations = []
-        all_conds = []  # condition marker
-        for e in range(len(good_evs)):
-            ev = good_evs[e]
-            all_onsets    = N.hstack((all_onsets,    good_ons[e].onsets))
-            all_durations = N.hstack((all_durations, good_ons[e].durations))
-            # yoh: it was marking with (ev/2)+1 I guess assuming presence of derivatives EVs?
-            all_conds     = N.hstack((all_conds,     N.ones(len(good_ons[e].onsets))*((ev/2)+1)))
-
-        #all_onsets=N.round(all_onsets/TR)  # round to nearest TR number
-        ntrials = len(all_onsets)
-        glm_res_full = N.zeros((nvox, ntrials))
-        dm_trials = N.zeros((ntp, ntrials))
-        dm_full = []
-        for t in range(ntrials):
-            verbose(2, "Estimating for trial %d" % t)
-
-            if all_onsets[t] > max_evtime:
-                continue
-            # build model for each trial
-            dm_trial = N.zeros(n_up)
-            window_ons = [N.where(time_up==x)[0][0]
-                          for x in time_up
-                          if all_onsets[t] < x < all_onsets[t] + all_durations[t]]
-            dm_trial[window_ons] = 1
-            dm_trial = N.convolve(dm_trial, hrf)[0:ntp/time_res*TR:(TR/time_res)]
-            dm_trials[:, t] = dm_trial
-
-        # filter the desmtx, except for the nuisance part (which is already filtered)
-        if len(motion_evs)>0:
-            dm_full = N.hstack((N.dot(F, dm_trials), dm_nuisanceevs))
+        if method == 'lsone':
+            all_conds, glm_res_full = extract_lsone(
+                        data, TR, time_res,
+                        spm_hrf, F,
+                        good_ons,
+                        good_evs, nuisance_evs, withderiv_evs,
+                        desmat,
+                        collapse_other_conditions=collapse_other_conditions)
+        elif method == 'lsall':
+            all_conds, glm_res_full = extract_lsall(
+                        data, TR, time_res,
+                        spm_hrf, F,
+                        good_ons,
+                        good_evs, nuisance_evs,# withderiv_evs,
+                        desmat)
         else:
-            dm_full = N.dot(F, dm_trials)
+            raise ValueError(method)
 
-        dm_full = dm_full - N.kron(N.ones((dm_full.shape[0], dm_full.shape[1])),
-                                   N.mean(dm_full, 0))[0:dm_full.shape[0], 0:dm_full.shape[1]]
-        dm_full = N.hstack((dm_full, N.ones((ntp, 1))))
-        glm_res_full = N.dot(N.linalg.pinv(dm_full), data.samples)
-        glm_res_full = glm_res_full[0:ntrials, :]
-
-        #for v in range(nvox):
-                     #try:
-         #                glm_result = estimate_OLS(dm_full, data.samples[:, v])
-          #               glm_res_full[v, :] = glm_result[0:ntrials]
-                     #except:
-                     #    print 'problem with trial %d, cond %d'%(t, e)
-
-
+        all_conds = N.asanyarray(all_conds)   # assure array here
+        # map the data into images and save to betaseries directory
         for e in range(1, len(good_evs)+1):
             ni = map2nifti(data, data=glm_res_full[N.where(all_conds==e)[0], :])
             ni.to_filename(pjoin(outdir, 'ev%d_%s.nii.gz' % (e, method)))
@@ -402,9 +450,12 @@ if __name__ == '__main__':
     verbose.level = 3
     # #'/usr/share/fsl-feeds/data/fmri.feat/',
     if True:
-        pybetaseries('/home/yoh/proj/pymvpa/pymvpa/3rd/pybetaseries/run001_test_data.feat',
+        topdir = '/home/yoh/proj/pymvpa/pymvpa/3rd/pybetaseries/run001_test_data.feat'
+        pybetaseries(topdir,
+                     #methods=['lsone'],
                      design_fsf_file='design_yoh.fsf',
-                     mask_file='mask_small.hdr')
+                     #mask_file='mask_small.hdr',
+                     outdir=pjoin(topdir, 'betaseries-yarikcode'))
     else:
         topdir = '/data/famface/nobackup_pipe+derivs+nipymc/famface_level1/firstlevel'
         modelfit_dir = pjoin(topdir, 'modelfit/_subject_id_km00/_fwhm_4.0/')
