@@ -68,6 +68,7 @@ def extract_lsone(data, TR, time_res,
                   good_ons,
                   good_evs, nuisance_evs, withderiv_evs,
                   desmat,
+                  extract_evs=None,
                   collapse_other_conditions=True):
     # loop through the good evs and build the ls-one model
     # design matrix for each trial/ev
@@ -85,11 +86,19 @@ def extract_lsone(data, TR, time_res,
     trial_ctr = 0
     all_conds = []
     beta_maker = N.zeros((ntrials_total, ntp))
-    for e in range(len(good_evs)):
+
+    if extract_evs is None:
+        extract_evs = range(len(good_evs))
+
+    for e in extract_evs: # range(len(good_evs)):
         ev = good_evs[e]
         # first, take the original desmtx and remove the ev of interest
         other_good_evs = [x for x in good_evs if x != ev]
         # put the temporal derivatives into other_good_evs
+        # start with its own derivative.  This accounts for
+        # a significant amount of divergence from matlab implementation
+        if ev in withderiv_evs:
+            other_good_evs.append(ev+1)
         for x in other_good_evs:
             if x in withderiv_evs:
                 other_good_evs.append(x+1)
@@ -101,6 +110,8 @@ def extract_lsone(data, TR, time_res,
         verbose(2, 'processing ev %d: %d trials' % (e+1, ntrials))
         for t in range(ntrials):
             verbose(3, "processing trial %d" % t)
+            ## ad-hoc warning -- assumes interleaved presence of
+            ## derivatives' EVs
             all_conds.append((ev/2)+1)
             ## yoh: handle outside
             ## if cond_ons[t] > max_evtime:
@@ -112,7 +123,7 @@ def extract_lsone(data, TR, time_res,
             dm_toi = N.zeros(n_up)
             window_ons = [N.where(time_up==x)[0][0]
                           for x in time_up
-                          if (x > cond_ons[t]) & (x < cond_ons[t] + cond_dur[t])]
+                          if (x >= cond_ons[t]) & (x < cond_ons[t] + cond_dur[t])]
             dm_toi[window_ons] = 1
             dm_toi = N.convolve(dm_toi, hrf)[0:ntp/time_res*TR:(TR/time_res)]
             other_trial_ons = cond_ons[N.where(cond_ons!=cond_ons[t])[0]]
@@ -127,7 +138,7 @@ def extract_lsone(data, TR, time_res,
                 # find the timepoints that fall within the window b/w onset and onset + duration
                 window_ons = [N.where(time_up==x)[0][0]
                               for x in time_up
-                              if o < x < o + other_trial_dur[N.where(other_trial_ons==o)[0][0]]]
+                              if o <= x < o + other_trial_dur[N.where(other_trial_ons==o)[0][0]]]
                 dm_other[window_ons] = 1
 
             # Put together the design matrix
@@ -183,7 +194,8 @@ def extract_lsall(data, TR, time_res,
         ev = good_evs[e]
         all_onsets    = N.hstack((all_onsets,    good_ons[e].onsets))
         all_durations = N.hstack((all_durations, good_ons[e].durations))
-        # yoh: it was marking with (ev/2)+1 I guess assuming presence of derivatives EVs?
+        # yoh: ad-hoc warning -- it is marking with (ev/2)+1 (I guess)
+        # assuming presence of derivatives EVs
         all_conds     = N.hstack((all_conds,     N.ones(len(good_ons[e].onsets))*((ev/2)+1)))
 
     #all_onsets=N.round(all_onsets/TR)  # round to nearest TR number
@@ -235,7 +247,7 @@ def pybetaseries(fsfdir,
                  design_mat_file='design.mat',
                  data_file=None,
                  mask_file=None,
-                 extract_ev=None,
+                 extract_evs=None,
                  collapse_other_conditions=True):
     """Compute beta-series regression on a feat directory
 
@@ -339,7 +351,7 @@ def pybetaseries(fsfdir,
             good_evs.append(evctr)
             evctr += 1
             if design['fmri(deriv_yn%d)' % ev] == 1:
-                withderiv_evs.append(evctr)
+                withderiv_evs.append(evctr-1)
                 # skip temporal derivative
                 evctr += 1
             ev_events = FslEV3(pjoin(fsfdir, design['fmri(custom%d)' % ev]))
@@ -375,6 +387,7 @@ def pybetaseries(fsfdir,
                         good_ons,
                         good_evs, nuisance_evs, withderiv_evs,
                         desmat,
+                        extract_evs=extract_evs,
                         collapse_other_conditions=collapse_other_conditions)
         elif method == 'lsall':
             all_conds, glm_res_full = extract_lsall(
@@ -383,7 +396,8 @@ def pybetaseries(fsfdir,
                         good_ons,
                         good_evs,
                         desmat,
-                        extract_evs=[2])
+                        extract_evs=extract_evs,
+                        )
         else:
             raise ValueError(method)
 
@@ -464,10 +478,12 @@ if __name__ == '__main__':
         topdir = '/home/yoh/proj/pymvpa/pymvpa/3rd/pybetaseries/run001_test_data.feat'
         pybetaseries(topdir,
                      time_res=2./16,       # just to make matlab code
-                     methods=['lsall'],
+                     methods=['lsone'],
                      design_fsf_file='design_yoh.fsf',
                      #mask_file='mask_small.hdr',
-                     outdir=pjoin(topdir, 'betaseries-yarikcode-2-onlyev2-meanevm'))
+                     #extract_evs=[2],
+                     collapse_other_conditions=False,
+                     outdir=pjoin(topdir, 'betaseries-yarikcode-3-nocollapse3'))
     else:
         topdir = '/data/famface/nobackup_pipe+derivs+nipymc/famface_level1/firstlevel'
         modelfit_dir = pjoin(topdir, 'modelfit/_subject_id_km00/_fwhm_4.0/')
