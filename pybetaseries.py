@@ -153,8 +153,7 @@ def extract_lsone(data, TR, time_res,
                                     N.dot(F, dm_other[0:ntp, N.newaxis]),
                                     dm_otherevs,
                                     dm_nuisanceevs))
-            dm_full = dm_full - N.kron(N.ones(dm_full.shape[:2]),
-                                       N.mean(dm_full, 0))[:dm_full.shape[0], :dm_full.shape[1]]
+            dm_full -= dm_full.mean(0)
             dm_full = N.hstack((dm_full, N.ones((ntp, 1))))
             beta_maker_loop = N.linalg.pinv(dm_full)
             beta_maker[trial_ctr, :] = beta_maker_loop[0, :]
@@ -481,9 +480,9 @@ if __name__ == '__main__':
                      methods=['lsone'],
                      design_fsf_file='design_yoh.fsf',
                      #mask_file='mask_small.hdr',
-                     #extract_evs=[2],
+                     extract_evs=[2],
                      collapse_other_conditions=False,
-                     outdir=pjoin(topdir, 'betaseries-yarikcode-3-nocollapse3'))
+                     outdir=pjoin(topdir, 'betaseries-yarikcode-3-nocollapse4'))
     else:
         topdir = '/data/famface/nobackup_pipe+derivs+nipymc/famface_level1/firstlevel'
         modelfit_dir = pjoin(topdir, 'modelfit/_subject_id_km00/_fwhm_4.0/')
