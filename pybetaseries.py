@@ -164,7 +164,8 @@ def extract_lsall(data, TR, time_res,
                   hrf_gen, F,
                   good_ons,
                   good_evs, nuisance_evs, #unused withderiv_evs,
-                  desmat):
+                  desmat,
+                  extract_evs=None):
     ntp, nvox = data.shape
 
     hrf = hrf_gen(time_res)
@@ -176,7 +177,10 @@ def extract_lsall(data, TR, time_res,
     all_onsets = []
     all_durations = []
     all_conds = []  # condition marker
-    for e in range(len(good_evs)):
+
+    if extract_evs is None:
+        extract_evs = range(len(good_evs))
+    for e in extract_evs:
         ev = good_evs[e]
         all_onsets    = N.hstack((all_onsets,    good_ons[e].onsets))
         all_durations = N.hstack((all_durations, good_ons[e].durations))
@@ -204,6 +208,7 @@ def extract_lsall(data, TR, time_res,
         dm_trials[:, t] = dm_trial
 
     # filter the desmtx, except for the nuisance part (which is already filtered)
+    #import pydb;pydb.debugger()
     dm_full = N.dot(F, dm_trials)
     if len(nuisance_evs) > 0:
         # and stick nuisance evs if any to the back
@@ -227,6 +232,7 @@ def pybetaseries(fsfdir,
                  design_mat_file='design.mat',
                  data_file=None,
                  mask_file=None,
+                 extract_ev=None,
                  collapse_other_conditions=True):
     """Compute beta-series regression on a feat directory
 
@@ -373,7 +379,8 @@ def pybetaseries(fsfdir,
                         spm_hrf, F,
                         good_ons,
                         good_evs, nuisance_evs,# withderiv_evs,
-                        desmat)
+                        desmat,
+                        extract_evs=[2])
         else:
             raise ValueError(method)
 
@@ -414,7 +421,8 @@ def spm_hrf(TR, p=[6, 16, 1, 1, 6, 0, 32]):
     TR = float(TR)
     dt  = TR/fMRI_T
     u   = N.arange(p[6]/dt + 1) - p[5]/dt
-    hrf = scipy.stats.gamma.pdf(u, p[0]/p[2], scale=1.0/(dt/p[2])) - scipy.stats.gamma.pdf(u, p[1]/p[3], scale=1.0/(dt/p[3]))/p[4]
+    Gpdf = scipy.stats.gamma.pdf 
+    hrf = Gpdf(u, p[0]/p[2], scale=1.0/(dt/p[2])) - Gpdf(u, p[1]/p[3], scale=1.0/(dt/p[3]))/p[4]
     good_pts = N.array(range(N.int(p[6]/TR)))*fMRI_T
     hrf = hrf[list(good_pts)]
     # hrf = hrf([0:(p(7)/RT)]*fMRI_T + 1);
@@ -452,10 +460,11 @@ if __name__ == '__main__':
     if True:
         topdir = '/home/yoh/proj/pymvpa/pymvpa/3rd/pybetaseries/run001_test_data.feat'
         pybetaseries(topdir,
-                     #methods=['lsone'],
+                     time_res=2./16,       # just to make matlab code
+                     methods=['lsall'],
                      design_fsf_file='design_yoh.fsf',
                      #mask_file='mask_small.hdr',
-                     outdir=pjoin(topdir, 'betaseries-yarikcode'))
+                     outdir=pjoin(topdir, 'betaseries-yarikcode-2-onlyev2'))
     else:
         topdir = '/data/famface/nobackup_pipe+derivs+nipymc/famface_level1/firstlevel'
         modelfit_dir = pjoin(topdir, 'modelfit/_subject_id_km00/_fwhm_4.0/')
